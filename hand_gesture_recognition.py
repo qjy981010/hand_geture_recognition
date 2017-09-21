@@ -1,18 +1,28 @@
 import random
 import cv2
 import math
+import multiprocessing
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-def loadDataSet(fileName):
+def loadDataSet(fileName, labelnum):
     dataMat = []
-    for i in range(6):
+    startlist = []
+    endlist = []
+    for i in range(labelnum):
         with open(fileName + str(i) + '.txt') as fp:
-            for line in fp.readlines():
+            lines = fp.readlines()
+            if i:
+                startlist.append(endlist[i-1])
+            else:
+                startlist.append(0)
+            endlist.append(startlist[i] + len(lines))
+            for line in lines:
                 lineArr = line.strip().split()
                 dataMat.append([float(x) for x in lineArr])
-    return dataMat
+    return dataMat, startlist, endlist
 
 
 def oldloadDataSet(fileName):
@@ -163,7 +173,7 @@ def smoP(dataMatIn, classLabels, C, toler, maxIter, kTup=('lin', 0)):
             for i in range(oS.m):
                 alphaPairsChanged += innerL(i, oS)
             it += 1
-        else:  # go over non-bound (railed) alphas
+        else:  # go over non-round (railed) alphas
             nonBoundIs = np.nonzero((oS.alphas.A > 0) * (oS.alphas.A < C))[0]
             for i in nonBoundIs:
                 alphaPairsChanged += innerL(i, oS)
@@ -186,129 +196,57 @@ def calcWs(alphas, dataMat, labelMat):
     return w
 
 
-def oldmainTrain(k1=1.3):
-    dataMat, labels = oldloadDataSet(
-        '/home/qjy/ai/task/gesture/data/gesture_data.txt')
-    b, alphas = smoP(dataMat, labels, 200, 0.0001, 10000, ('rbf', k1))
-    datMat = np.mat(dataMat)
-    labelMat = np.mat(labels).transpose()
-    svInd = np.nonzero(alphas.A > 0)[0]
-    sVs = datMat[svInd]  # get matrix of only support vectors
-    labelSV = labelMat[svInd]
-    print("there are %d Support Vectors" % np.shape(sVs)[0])
-    m, n = np.shape(datMat)
-    errorCount = 0
-    for i in range(m):
-        kernelEval = kernelTrans(sVs, datMat[i, :], ('rbf', k1))
-        predict = kernelEval.T * np.multiply(labelSV, alphas[svInd]) + b
-        if np.sign(predict) != np.sign(labels[i]):
-            errorCount += 1
-    print("the training error rate is: %f" % (float(errorCount) / m))
-    return sVs, k1, labelSV, alphas[svInd], b
-
-
 def nothing():
     pass
 
 
-def oldget_video_guass_hsv(sVs, k1, labelSV, alphas_svInd, b):
-    cap = cv2.VideoCapture(0)
-    if (cap.isOpened() is False):
-        print("Error opening video stream or file")
-    count = 100
-    fp = open('gesture_data.txt', 'a')
-    while(cap.isOpened()):
-        ret, frame = cap.read()
-        # Capture frame-by-frame
-        if ret is True:
-            cv2.rectangle(frame, (300, 300), (100, 100), (0, 255, 0), 0)
-            crop_img = frame[100:300, 100:300]
-            blurred = cv2.GaussianBlur(crop_img, (17, 17), 0)
-            cv2.imshow('blurred', blurred)
-            hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
-
-            lower_skin = np.array([100, 50, 0])
-            upper_skin = np.array([125, 255, 255])
-            mask = cv2.inRange(hsv, lower_skin, upper_skin)
-            hu = cv2.HuMoments(cv2.moments(mask))
-            cv2.putText(frame, str(hu), (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            cv2.imshow('frame', frame)
-            cv2.imshow('Frame', mask)
-            k = cv2.waitKey(10)
-            print(k)
-        if k == 27:
-            break
-        if k == ord(' '):
-            print(count)
-            print(hu)
-
-            for i in range(7):
-                fp.write(str(hu[i][0]))
-                if i == 6:
-                    fp.write(' 1\n')
-                else:
-                    fp.write(' ')
-            cv2.imwrite('img/' + str(count) + '.jpg', mask)
-            count += 1
-        if k == 106:
-            datMat = np.mat([[x[0] for x in hu]])
-            kernelEval = kernelTrans(sVs, datMat[0, :], ('rbf', k1))
-            predict = kernelEval.T * np.multiply(labelSV, alphas_svInd) + b
-            print(np.sign(predict))
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-def mainTrain(datanum=50, labelnum=6, k1=1.3):
-    data = loadDataSet('/home/qjy/ai/task/gesture/data/')
-    judge_feats = []
+def train(li, i, startlist, endlist, data, ks, errors):
     datMat = np.mat(data)
-    labels = [1] * datanum + [-1] * datanum * (labelnum - 1)
+    labels = [-1] * startlist[i] + [1] * (endlist[i] - startlist[i]) + \
+        [-1] * (endlist[-1] - endlist[i])
+    b, alphas = smoP(data, labels, 200, 0.0001, 10000000, ('rbf', ks[i]))
+    labelMat = np.mat(labels).transpose()
+    svInd = np.nonzero(alphas.A > 0)[0]
+    judge = (datMat[svInd], labelMat[svInd], alphas[svInd], b ,i)
+    errorcount = 0
+    for j in range(datMat.shape[0]):
+        kernelEval = kernelTrans(judge[0], datMat[j, :], ('rbf', ks[i]))
+        predict = (kernelEval.T *
+                   np.multiply(judge[1], judge[2]) + judge[3])[0][0]
+        if np.sign(predict) != np.sign(labels[j]):
+            errorcount += 1
+    li.append(judge)
+    errors.append((errorcount / datMat.shape[0], i, ks[i]))
+    return judge
+
+
+def mainTrain(resultfile, labelnum, data, startlist, endlist, ks):
+    judge_feats = []
+    manager = multiprocessing.Manager()
+    li = manager.list()
+    errors = manager.list()
+    pool = multiprocessing.Pool(processes=6)
+    # train(li, 4, startlist, endlist, data, ks, errors)
+    # li.pop()
+    # errors.pop()
     for i in range(labelnum):
-        if i:
-            labels[i * datanum: (i + 1) * datanum] = [1] * datanum
-
-        b, alphas = smoP(data, labels, 200, 0.0001, 10000, ('rbf', k1))
-        labelMat = np.mat(labels).transpose()
-        svInd = np.nonzero(alphas.A > 0)[0]
-        judge_feats.append(
-            (datMat[svInd], labelMat[svInd], alphas[svInd], b))
-        for row in data:
-            da = np.mat([row])[0, :]
-            judge = judge_feats[i]
-            kernelEval = kernelTrans(judge[0], da, ('rbf', k1))
-            predict = (kernelEval.T *
-                       np.multiply(judge[1], judge[2]) + judge[3])[0][0]
-            print(i, predict, data.index(row) // 50)
-
-        if not i == labelnum - 1:
-            labels[i * datanum: (i + 1) * datanum] = [-1] * datanum
-
-    for row in data:
-        da = np.mat([row])[0, :]
-        maxlabel = 0
-        maxpred = -0x7fff
-        for i in range(labelnum):
-            judge = judge_feats[i]
-            kernelEval = kernelTrans(judge[0], da, ('rbf', k1))
-            predict = (kernelEval.T *
-                       np.multiply(judge[1], judge[2]) + judge[3])[0][0]
-            print(i, predict)
-            if maxpred < predict:
-                maxpred = predict
-                maxlabel = i
-        print(maxlabel)
+        pool.apply_async(train, args=(li, i, startlist, endlist, data, ks, errors))
+    pool.close()
+    pool.join()
+    judge_feats = li
+    np.save(resultfile, judge_feats)
+    print(errors)
+    with open('error.txt', 'a') as f:
+        f.write(str(ks) + ':\n' + str(errors) + '\n\n')
     return judge_feats
 
 
-def get_video_guass_hsv(judge_feats, datanum=50, labelnum=6, k1=1.3):
+def get_video_guass_hsv(judge_feats, labelnum, startlist, endlist, ks):
     cap = cv2.VideoCapture(0)
     if (cap.isOpened() is False):
         print("Error opening video stream or file")
         return
-    count = [0] * labelnum
+    count = [endlist[i] - startlist[i] for i in range(labelnum)]
     cv2.namedWindow('image')
     # create trackbars for color change
     cv2.createTrackbar('Hs', 'image', 0, 179, nothing)
@@ -326,43 +264,42 @@ def get_video_guass_hsv(judge_feats, datanum=50, labelnum=6, k1=1.3):
             blurred = cv2.GaussianBlur(crop_img, (17, 17), 0)
             # cv2.imshow('blurred', blurred)
             hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
-
-            # lower_skin = np.array([100, 50, 0])
-            # upper_skin = np.array([125, 255, 255])
             lower_skin = np.array([90, 40, 50])
             upper_skin = np.array([125, 130, 255])
-            # lower_skin = np.array([cv2.getTrackbarPos('Hs','image'), cv2.getTrackbarPos('Ss','image'), cv2.getTrackbarPos('Vs','image')])
-            # upper_skin = np.array([cv2.getTrackbarPos('He','image'), cv2.getTrackbarPos('Se','image'), cv2.getTrackbarPos('Ve','image')])
-            # 100 to 125 and 40 to 130 and 50 to 255
-            #
-
             mask = cv2.inRange(hsv, lower_skin, upper_skin)
-            mask = cv2.GaussianBlur(mask, (9, 9), 0)
-            image, contours, hierarchy = cv2.findContours(mask.copy(), \
-                   cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+            mask = cv2.GaussianBlur(mask, (7, 7), 0)
+            image, contours, hierarchy = cv2.findContours(mask.copy(),
+                                                          cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
             if len(contours):
-                cnt = max(contours, key = lambda x: cv2.contourArea(x))
+                cnt = max(contours, key=lambda x: cv2.contourArea(x))
                 hull = cv2.convexHull(cnt)
-                drawing = np.zeros(crop_img.shape,np.uint8)
-                epsilon=0.03*cv2.arcLength(cnt,True)
-                approx = cv2.approxPolyDP(cnt,epsilon,True)
+                drawing = np.zeros(crop_img.shape, np.uint8)
+                epsilon = 0.03*cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, epsilon, True)
                 cv2.drawContours(drawing, [cnt], 0, (0, 255, 0), 0)
+                cv2.drawContours(drawing, [hull], 0, (0, 0, 255), 0)
                 cv2.drawContours(drawing, [approx], 0, (0, 255, 0), 0)
-                hu = cv2.HuMoments(cv2.moments(cnt))[:4]
+                hu = cv2.HuMoments(cv2.moments(cnt))[:2]
+                hu1 = round(hu[0][0] * 10, 2)
+                hu2 = round(hu[1][0] * 1000, 2)
                 L = cv2.arcLength(cnt, True)
                 S = cv2.contourArea(cnt)
-                SdivideL = L / S
+                LdivideS = round(S / L, 2)
                 Lhull = cv2.arcLength(hull, True)
-                leftmost = cnt[cnt[:,:,0].argmin()][0][0]
-                rightmost = cnt[cnt[:,:,0].argmax()][0][0]
-                LhdivideB = (L - Lhull) / (rightmost - leftmost)
+                leftmost = cnt[cnt[:, :, 0].argmin()][0][0]
+                rightmost = cnt[cnt[:, :, 0].argmax()][0][0]
+                BdivideLh = round((L - Lhull) / (rightmost - leftmost), 2)
                 hull = cv2.convexHull(cnt, returnPoints=False)
                 defects = cv2.convexityDefects(cnt, hull)
-                # cv2.drawContours(drawing, [hull], 0,(0, 0, 255), 0)
-                count_concave = 0; count_convex = 0
+                count_concave = 0
+                count_convex = 0
+                longest = 0
+                shortest = 1000000
+                lastfinger = [0, 0]
+                longestdist = 0
                 if defects is not None:
                     for i in range(defects.shape[0]):
-                        s,e,f,d = defects[i,0]
+                        s, e, f, d = defects[i, 0]
                         start = tuple(cnt[s][0])
                         end = tuple(cnt[e][0])
                         far = tuple(cnt[f][0])
@@ -370,49 +307,81 @@ def get_video_guass_hsv(judge_feats, datanum=50, labelnum=6, k1=1.3):
                         b = (far[0] - start[0])**2 + (far[1] - start[1])**2
                         c = (end[0] - far[0])**2 + (end[1] - far[1])**2
                         if a < b + c:
+                            longest = max(longest, b, c)
+                            shortest = min(shortest, b, c)
                             count_concave += 1
-                for i in range(1, len(approx) - 1):
-                    a = math.sqrt((approx[i-1][0][0] - approx[i+1][0][0])**2 + (approx[i-1][0][1] - approx[i+1][0][1])**2)
-                    b = math.sqrt((approx[i][0][0] - approx[i+1][0][0])**2 + (approx[i][0][1] - approx[i+1][0][1])**2)
-                    c = math.sqrt((approx[i-1][0][0] - approx[i][0][0])**2 + (approx[i-1][0][1] - approx[i][0][1])**2)
-                    angle = math.acos((b**2 + c**2 - a**2)/(2*b*c)) * 57
-                    if angle < 50:
-                        count_convex += 1
-                cv2.putText(frame, 's / l: ' + str(count_concave) + '   lhull / breadth: ' + str(LhdivideB), (50, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                for i in range(0, len(approx)):
+                    pre = i - 1
+                    nex = i + 1
+                    if i == 0:
+                        pre = len(approx) - 1
+                    elif i == len(approx) - 1:
+                        nex = 0
+                    if approx[i][0][1] < approx[pre][0][1] and approx[i][0][1] < approx[nex][0][1]:
+                        a = math.sqrt((approx[pre][0][0] - approx[nex][0][0])**2 + (approx[pre][0][1] - approx[nex][0][1])**2)
+                        b = math.sqrt((approx[i][0][0] - approx[nex][0][0])**2 + (approx[i][0][1] - approx[nex][0][1])**2)
+                        c = math.sqrt((approx[pre][0][0] - approx[i][0][0])**2 + (approx[pre][0][1] - approx[i][0][1])**2)
+                        angle = math.acos((b**2 + c**2 - a**2)/(2*b*c)) * 57
+                        if angle < 50:
+                            count_convex += 1
+                            if lastfinger[0]:
+                                longestdist = max(longestdist, (approx[i][0][
+                                                  0] - lastfinger[0])**2 + (approx[i][0][1] - lastfinger[1])**2)
+                            lastfinger = approx[i][0]
+                # print(hu1, hu2, count_concave, count_convex, longest / 1000, shortest / 1000, math.sqrt(longestdist) / 10)
+                features = (hu1, hu2, count_concave, count_convex, longest /
+                            1000, shortest / 1000, math.sqrt(longestdist) / 10)
                 cv2.imshow('drawing', drawing)
+
+                data = np.mat([list(features)])[0, :]
+                maxlabel = 0
+                maxpred = -0x7fff
+                for i in range(labelnum):
+                    judge = judge_feats[i]
+                    # if judge[4] == 9:
+                    #     continue
+                    kernelEval = kernelTrans(judge[0], data, ('rbf', ks[judge[4]]))
+                    predict = (kernelEval.T *
+                               np.multiply(judge[1], judge[2]) + judge[3])[0][0]
+                    if maxpred < predict:
+                        maxpred = predict
+                        maxlabel = judge[4]
+
+                cv2.putText(frame, str(maxlabel), (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2, 2)
             cv2.imshow('frame', frame)
             cv2.imshow('mask', mask)
             k = cv2.waitKey(10)
         if k == 27:
             break
-        elif 47 < k and k < 54:
+        elif 47 < k and k < 58:
             index = k - 48
             print(index, count[index])
-            print(hu)
-            with open('/home/qjy/ai/task/gesture/data/' + str(index) + '.txt', 'a') as fp:
+            with open('/home/qjy/ai/task/hand_geture_recognition/data/' + str(index) + '.txt', 'a') as fp:
                 for i in range(7):
-                    fp.write(str(hu[i][0]))
+                    fp.write(str(features[i]))
                     if i == 6:
                         fp.write('\n')
                     else:
                         fp.write(' ')
-            cv2.imwrite('data/img/' + str(index) + '/' +
+            cv2.imwrite('/home/qjy/ai/task/hand_geture_recognition/data/img/' + str(index) + '/' +
                         str(count[index]) + '.jpg', mask)
             count[index] += 1
         elif k == 106:
-            data = np.mat([[x[0] for x in hu]])[0, :]
+            data = np.mat([list(features)])[0, :]
             maxlabel = 0
             maxpred = -0x7fff
             for i in range(labelnum):
                 judge = judge_feats[i]
-                kernelEval = kernelTrans(judge[0], data, ('rbf', k1))
+                # if judge[4] == 9:
+                #     continue
+                kernelEval = kernelTrans(judge[0], data, ('rbf', ks[judge[4]]))
                 predict = (kernelEval.T *
                            np.multiply(judge[1], judge[2]) + judge[3])[0][0]
-                print(i, predict)
+                print(judge[4], predict)
                 if maxpred < predict:
                     maxpred = predict
-                    maxlabel = i
+                    maxlabel = judge[4]
             print(maxlabel)
 
     cap.release()
@@ -420,8 +389,13 @@ def get_video_guass_hsv(judge_feats, datanum=50, labelnum=6, k1=1.3):
 
 
 if __name__ == '__main__':
-    judge_feats = ()
-    # judge_feats = mainTrain()
-    get_video_guass_hsv(judge_feats)
-    # sVs, k1, labelSV, alphas_svInd, b = oldmainTrain()
-    # oldget_video_guass_hsv(sVs, k1, labelSV, alphas_svInd, b)
+    resultfile = 'result.npy'
+    labelnum = 10
+    ks = [9.3, 11.1, 12.9, 14.4, 13.5, 14.4, 11.100000000000005, 9.3, 11.0, 14.4]
+    data, startlist, endlist = loadDataSet('/home/qjy/ai/task/hand_geture_recognition/data/', labelnum)
+    # for k1 in np.arange(9, 15, 0.3):
+    judge_feats = mainTrain(resultfile, labelnum, data, startlist, endlist, ks)
+    # judge_feats = np.load(resultfile)
+    print(len(judge_feats))
+    get_video_guass_hsv(judge_feats, labelnum, startlist, endlist, ks)
+    # time.sleep(30)

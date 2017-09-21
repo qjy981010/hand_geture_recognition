@@ -185,13 +185,15 @@ def get_video_guass_hsv():
             cv2.imshow('blurred', blurred)
             hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
 
-            lower_skin = np.array([100, 50, 0])
-            upper_skin = np.array([125, 255, 255])
+            lower_skin = np.array([90, 40, 50])
+            upper_skin = np.array([125, 130, 255])
+            # lower_skin = np.array([100, 50, 0])
+            # upper_skin = np.array([125, 255, 255])
 
             mask = cv2.inRange(hsv, lower_skin, upper_skin)
-            hu = cv2.HuMoments(cv2.moments(mask))
+            hu = cv2.HuMoments(cv2.moments(mask))[:2]
             cv2.putText(frame, str(hu), (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
             cv2.imshow('frame', frame)
             cv2.imshow('Frame', mask)
             k = cv2.waitKey(10)
